@@ -1,0 +1,447 @@
+import org.antlr.v4.runtime.*;
+import org.antlr.v4.runtime.tree.*;
+import java.util.Stack;
+
+public class MicroIRListener extends MicroBaseListener {
+	SymbolTableTree symbolTree;
+	ParseTreeProperty<NodeProperties> ptp;
+
+	int registerNumber;
+	Stack<String> loop_start;
+	Stack<String> loop_end;
+	Stack<String> if_cond;
+	Stack<Integer> record;
+	int labelNumber;
+	boolean executePrimary = true;
+	boolean idListRecord = false;
+	boolean newFunction = false;
+	boolean lastWhile;
+	String idList;
+	GenerateCode codeGenerator;
+
+	public MicroIRListener(SymbolTableTree symbolTree, GenerateCode codeGenerate) {
+		this.symbolTree = symbolTree;
+		this.ptp = new ParseTreeProperty<NodeProperties>();
+		this.registerNumber = 0;
+		this.labelNumber = 0;
+		this.codeGenerator = codeGenerate;
+		this.loop_start = new Stack<String>();
+		this.loop_end = new Stack<String>();
+		this.if_cond = new Stack<String>();
+		this.record = new Stack<Integer>();
+		codeGenerator.add_irNode("IR code", null, null, null);
+	}
+
+	@Override
+	public void exitProgram(MicroParser.ProgramContext ctx) {
+		codeGenerator.add_irNode("tiny code", null, null, null);;
+	}
+
+	private String getNewLabel() {
+		labelNumber += 1;
+		return new String("label" + labelNumber);
+	}
+
+	private String getNewRegister(String type) {
+		registerNumber += 1;
+		String registerName = new String("$T" + registerNumber);
+		symbolTree.add_one_variable(registerName, type);
+		return registerName;
+	}
+
+	private String lookupOpcode(String operator) {
+		switch (operator) {
+			case ">": return "LE";
+			case "<": return "GE";
+			case ">=": return "LT";
+			case "<=": return "GT";
+			case "!=": return "EQ";
+			case "=": return "NE";
+			default: return "compareOpERROR";
+		}
+	}
+
+	private String lookupOpcode(String operator, String type) {
+		if (operator.equals("+")) {
+			if (type.equals("INT"))
+				return "ADDI";
+			if (type.equals("FLOAT"))
+				return "ADDF";
+		}
+		if (operator.equals("-")) {
+			if (type.equals("INT"))
+				return "SUBI";
+			if (type.equals("FLOAT"))
+				return "SUBF";
+		}
+		if (operator.equals("*")) {
+			if (type.equals("INT"))
+				return "MULTI";
+			if (type.equals("FLOAT"))
+				return "MULTF";
+		}
+		if (operator.equals("/")) {
+			if (type.equals("INT"))
+				return "DIVI";
+			if (type.equals("FLOAT"))
+				return "DIVF";
+		}
+		return "ERROR";
+	}
+
+	public void addNodeProp(ParserRuleContext ctx, String key, String value) {
+		ptp.get(ctx).data.put(key, value);
+	}
+
+	public void passToParent(ParserRuleContext ctx, String str) {
+		ParserRuleContext parent = ctx.getParent();
+		if (parent != null) {
+			NodeProperties parentNodeProps = ptp.get(ctx.getParent());
+			if (str != "null") {
+				parentNodeProps.text = parentNodeProps.text + " " + str;
+			}
+		}
+	}
+
+	@Override
+	public void enterRead_stmt(MicroParser.Read_stmtContext ctx) { 
+		idListRecord = true;
+	}
+
+	@Override
+	public void exitAug_stmt(MicroParser.Aug_stmtContext ctx){
+		if (ctx.getText().startsWith("BREAK") || ctx.getText().startsWith("BREAK")){
+			String label = loop_end.peek();
+			codeGenerator.add_irNode("JUMP", label, null, null);
+		}else if (ctx.getText().startsWith("CONTINUE")){
+			String label = loop_start.peek();
+			codeGenerator.add_irNode("JUMP", label, null, null);
+		}
+	}
+
+	@Override
+	public void exitRead_stmt(MicroParser.Read_stmtContext ctx) { 
+
+		String [] parts = idList.split(",");
+		for (int i = 0; i < parts.length; i++){
+			String type =  symbolTree.lookup(parts[i]).type;
+			if (type.equals("INT")){
+				codeGenerator.add_irNode("READI", parts[i], null, null);
+			}else if(type.equals("FLOAT")){
+				codeGenerator.add_irNode("READF", parts[i], null, null);
+			}
+		}
+		idList = null;
+		idListRecord = false;
+	}
+
+	@Override
+	public void exitId_list(MicroParser.Id_listContext ctx) { 
+		if (idListRecord == true){
+			idList = ctx.getText();
+		}
+	}	
+
+	@Override
+	public void enterWrite_stmt(MicroParser.Write_stmtContext ctx) {
+		idListRecord = true;
+	}
+
+	@Override
+	public void exitWrite_stmt(MicroParser.Write_stmtContext ctx) {
+
+		String [] parts = idList.split(",");
+		for (int i = 0; i < parts.length; i++){
+			String type =  symbolTree.lookup(parts[i]).type;
+			if (type.equals("INT")){
+				codeGenerator.add_irNode("WRITEI", parts[i], null, null);
+			}else if(type.equals("FLOAT")){
+				codeGenerator.add_irNode("WRITEF", parts[i], null, null);
+			}else {
+				codeGenerator.add_irNode("WRITES", parts[i], null, null);
+			}
+		}
+		idList = null;
+		idListRecord = false;	
+	}
+
+	@Override
+	public void enterAug_if_stmt(MicroParser.Aug_if_stmtContext ctx) {
+		//System.out.println("enter if: ");
+		lastWhile = false;
+                String label = getNewLabel();
+		if_cond.push(label);
+		if (record.isEmpty() == false){
+			int temp = record.pop();
+			temp += 1;
+			record.push(temp);
+		}
+		symbolTree.scope_begin();
+	}
+
+	@Override
+	public void exitAug_else_part(MicroParser.Aug_else_partContext ctx) {
+		//System.out.println("exit else: ");
+		symbolTree.scope_end();
+	}
+
+	@Override
+	public void enterAug_else_part(MicroParser.Aug_else_partContext ctx) {
+		if (ctx.getText().toLowerCase().contains("else")){
+			//System.out.println("enter else: ");
+			String old_label = if_cond.pop();
+			String label = getNewLabel();
+			if_cond.push(label);
+			codeGenerator.add_irNode("JUMP", label, null, null);
+			codeGenerator.add_irNode("LABEL", old_label, null, null);
+		}
+		symbolTree.scope_begin();
+	}
+
+	@Override
+	public void exitAug_if_stmt(MicroParser.Aug_if_stmtContext ctx) {
+		//System.out.println("eixt if: ");
+		if (record.isEmpty() == false){
+			int temp = record.pop();
+			temp -= 1;
+			record.push(temp);
+		}
+		String label = if_cond.pop();
+		codeGenerator.add_irNode("LABEL", label, null, null);
+		symbolTree.scope_end();
+	}
+
+	@Override
+	public void enterWhile_stmt(MicroParser.While_stmtContext ctx) {
+		//System.out.println("enter while: ");
+
+		String start = getNewLabel();
+		String end = getNewLabel();
+		record.push(0);
+		loop_start.push(start);
+		loop_end.push(end);
+		lastWhile = true;
+		codeGenerator.add_irNode("LABEL", start, null, null);
+		symbolTree.scope_begin();
+	}
+
+	@Override
+	public void exitWhile_stmt(MicroParser.While_stmtContext ctx) {
+		//System.out.println("exit while: ");
+		String start = loop_start.pop();
+		String end = loop_end.pop();
+		record.pop();
+		codeGenerator.add_irNode("JUMP", start, null, null);
+		codeGenerator.add_irNode("LABEL", end, null, null);
+		symbolTree.scope_end();
+	}
+
+	@Override public void enterFunc_decl(MicroParser.Func_declContext ctx) {
+		newFunction = true;		
+	}
+
+	@Override
+	public void exitId(MicroParser.IdContext ctx) {
+		if (newFunction == true){
+			symbolTree.scope_begin(ctx.getText());
+			codeGenerator.add_irNode("LABEL", ctx.getText(), null, null);
+			//System.out.println("EXITID: LABEL " + ctx.getText());
+			codeGenerator.add_irNode("LINK", null, null, null);	
+			newFunction = false;
+		}else{
+			NodeProperties parentNodeProps = ptp.get(ctx.getParent());
+
+			if (parentNodeProps.data.containsKey("assign_Lvalue")){
+				addNodeProp(ctx.getParent(), "assign_Lvalue", ctx.getText());
+			}
+		}
+	}
+
+	@Override
+	public void exitFunc_decl(MicroParser.Func_declContext ctx) {
+		symbolTree.scope_end();
+		codeGenerator.add_irNode("RET", null, null, null);			
+	}
+
+	@Override
+	public void enterAssign_expr(MicroParser.Assign_exprContext ctx) {
+		ptp.get(ctx).data.put("assign_Lvalue", null);
+	}
+
+	@Override
+	public void exitAssign_expr(MicroParser.Assign_exprContext ctx) {
+		String Lvalue = ptp.get(ctx).data.get("assign_Lvalue");
+		String storeOp = "ERROR";
+		String LvalueType = symbolTree.lookup(Lvalue).type;
+		if (LvalueType.equals("INT")) {
+			storeOp = "STOREI";
+		} else if (LvalueType.equals("FLOAT")) {
+			storeOp = "STOREF";
+		}
+
+		String primary = ptp.get(ctx).data.get("primary");
+		
+		if (primary.charAt(0) == '$'){
+			codeGenerator.add_irNode(storeOp, primary, Lvalue, null);
+		} else{
+			//String temp = getNewRegister(LvalueType);
+			codeGenerator.add_irNode(storeOp, primary, Lvalue, null);
+			//codeGenerator.add_irNode(storeOp, temp, Lvalue, null);
+			//addNodeProp(ctx, "primary", temp);
+		}
+	}
+
+	@Override
+	public void exitAddop(MicroParser.AddopContext ctx) {
+
+		addNodeProp(ctx, "addop", ctx.getText());
+	}
+
+	@Override
+	public void exitMulop(MicroParser.MulopContext ctx) {
+
+		addNodeProp(ctx, "mulop", ctx.getText());
+	}
+
+	@Override
+	public void exitPrimary(MicroParser.PrimaryContext ctx) {
+
+		if (executePrimary){
+				
+			String text = ctx.getText();
+			if (!symbolTree.contains_value(text)){
+				if (!ctx.getText().contains(".")){
+					text = getNewRegister("INT");
+					codeGenerator.add_irNode("STOREI", ctx.getText(), text, null);
+				}else{
+					text = getNewRegister("FLOAT");
+					codeGenerator.add_irNode("STOREF", ctx.getText(), text, null);
+				}
+			}
+			addNodeProp(ctx, "primary", text);
+		} else{
+			executePrimary = true;
+		}
+
+	}
+
+	@Override
+	public void exitQuote_primary(MicroParser.Quote_primaryContext ctx) { 
+		addNodeProp(ctx, "primary", "$T" + registerNumber);
+		executePrimary = false;
+	}
+
+	@Override
+	public void enterEveryRule(ParserRuleContext ctx){
+		if (ctx.getText() != null) {
+			ptp.put(ctx, new NodeProperties(ctx.getText()));
+		}
+	}
+
+	@Override
+	public void exitEveryRule(ParserRuleContext ctx){
+
+		ParserRuleContext parent = ctx.getParent();
+		if (parent != null) {
+			NodeProperties parentNodeProps = ptp.get(ctx.getParent());
+			parentNodeProps.data.putAll(ptp.get(ctx).data);
+		}
+	}
+
+	@Override
+	public void exitFactor(MicroParser.FactorContext ctx) {
+
+		NodeProperties expr_prefix = ptp.get(ctx.getParent().getChild(0));
+
+		if (!expr_prefix.toString().isEmpty()) {
+
+			String type = symbolTree.lookup(ptp.get(ctx).data.get("primary")).type;
+			String op1 = expr_prefix.data.get("primary");
+			String op2 = ptp.get(ctx).data.get("primary");
+			String temp;
+
+			temp = getNewRegister(type);
+
+			String opcode = lookupOpcode(expr_prefix.data.get("addop"), type);
+
+			codeGenerator.add_irNode(opcode, op1, op2, temp);
+
+			addNodeProp(ctx, "primary", temp);
+		}
+	}
+
+	@Override
+	public void exitPostfix_expr(MicroParser.Postfix_exprContext ctx) {
+
+		NodeProperties factor_prefix = ptp.get(ctx.getParent().getChild(0));
+
+		if (!factor_prefix.toString().isEmpty()) {
+
+			String type = symbolTree.lookup(ptp.get(ctx).data.get("primary")).type;
+			String temp = getNewRegister(type);
+
+			String opcode = lookupOpcode(factor_prefix.data.get("mulop"), type);
+
+			codeGenerator.add_irNode(opcode, factor_prefix.data.get("primary"),
+                                                ptp.get(ctx).data.get("primary"), temp);
+
+			addNodeProp(ctx, "primary", temp);
+		}
+	}
+
+	@Override
+	public void exitExpr(MicroParser.ExprContext ctx) {
+
+		NodeProperties np = ptp.get(ctx);
+
+		if (ptp.get(ctx).data.containsKey("register")) {
+			addNodeProp(ctx, "register", ptp.get(ctx).data.get("register"));
+		} else {
+			addNodeProp(ctx, "register", ptp.get(ctx).data.get("primary"));
+		}
+	}
+
+	@Override
+	public void exitExpr_prefix(MicroParser.Expr_prefixContext ctx) {
+
+		NodeProperties parentProps = ptp.get(ctx.getParent());
+	}
+
+	@Override
+	public void exitFactor_prefix(MicroParser.Factor_prefixContext ctx) { 
+		NodeProperties parentProps = ptp.get(ctx.getParent());
+	}
+
+	@Override
+	public void exitCompop(MicroParser.CompopContext ctx) {
+		addNodeProp(ctx, "compop", ctx.getText());
+	}
+
+	@Override
+	public void exitCond(MicroParser.CondContext ctx) {
+		//System.out.println("exit_cond: ");
+		String compOp = lookupOpcode(ptp.get(ctx.getChild(1)).data.get("compop"));
+		//System.out.println("====================================================");
+		//System.out.println(symbolTree.lookup(ptp.get(ctx.getChild(0)).data.get("primary")).type);
+		String type = symbolTree.lookup(ptp.get(ctx.getChild(0)).data.get("primary")).type;
+		if (type.startsWith("INT")){
+			compOp += "I";
+		}else{
+			compOp += "F";
+		}
+		String string1 = ptp.get(ctx.getChild(0)).data.get("register");
+		String string2 = ptp.get(ctx.getChild(2)).data.get("register");
+		String label;
+
+		if (lastWhile == true){
+			label = loop_end.peek();
+		}else{
+			label = if_cond.peek();
+		}
+		//System.out.println(compOp + " " + string1 + " " + string2 + " " + label);
+
+		ptp.get(ctx.getChild(0)).data.get("register");
+		ptp.get(ctx.getChild(2)).data.get("register");
+		codeGenerator.add_irNode(compOp, string1, string2, label);
+	}
+}
